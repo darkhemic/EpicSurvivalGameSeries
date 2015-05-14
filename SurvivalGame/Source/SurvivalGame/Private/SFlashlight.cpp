@@ -19,14 +19,14 @@ ASFlashlight::ASFlashlight(const FObjectInitializer& ObjectInitializer)
 
 	SpotLightComp = CreateDefaultSubobject<USpotLightComponent>(TEXT("SpotLightComp"));
 	SpotLightComp->AttachTo(GetWeaponMesh(), LightAttachPoint, EAttachLocation::SnapToTarget);
-	SpotLightComp->SetCastShadows(false);
+	/*SpotLightComp->SetCastShadows(false);*/
 	SpotLightComp->AddLocalRotation(FRotator(0, -90, 0));
 
 	bIsActive = true;
 	LastEmissiveStrength = -1.0f;
 
 	EmissiveParamName = TEXT("Brightness");
-	MaxEmissiveIntensity = 20.0f;
+	MaxEmissiveIntensity = 5.0f;
 }
 
 

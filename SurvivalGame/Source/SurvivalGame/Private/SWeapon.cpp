@@ -27,9 +27,8 @@ ASWeapon::ASWeapon(const class FObjectInitializer& PCIP)
 
 	PrimaryActorTick.bCanEverTick = true;
 	PrimaryActorTick.TickGroup = TG_PrePhysics;
-	SetRemoteRoleForBackwardsCompat(ROLE_SimulatedProxy);
-	bReplicates = true;
-	//bReplicateInstigator = true;
+
+	SetReplicates(true);
 	bNetUseOwnerRelevancy = true;
 
 	MuzzleAttachPoint = TEXT("MuzzleFlashSocket");
@@ -332,13 +331,17 @@ void ASWeapon::HandleFiring()
 			ServerHandleFiring();
 		}
 
-		// TODO: if weapon is automatic firing rifle -> Setup refiring timer. (calls HandleFiring()
-
 		bRefiring = (CurrentState == EWeaponState::Firing && TimeBetweenShots > 0.0f);
 		if (bRefiring)
 		{
 			GetWorldTimerManager().SetTimer(HandleFiringTimerHandle, this, &ASWeapon::HandleFiring, TimeBetweenShots, false);
 		}
+	}
+
+	/* Make Noise on every shot. The data is managed by the PawnNoiseEmitterComponent created in SBaseCharacter and used by PawnSensingComponent in SZombieCharacter */
+	if (MyPawn)
+	{
+		MyPawn->MakePawnNoise(1.0f);
 	}
 
 	LastFireTime = GetWorld()->GetTimeSeconds();

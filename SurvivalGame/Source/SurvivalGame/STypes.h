@@ -18,6 +18,16 @@ enum class EInventorySlot : uint8
 };
 
 
+UENUM()
+enum class EBotBehaviorType : uint8
+{
+	/* Does not move, remains in place until a player is spotted */
+	Passive,
+
+	/* Patrols a region until a player is spotted */
+	Patrolling,
+};
+
 
 USTRUCT()
 struct FTakeHitInfo
@@ -31,7 +41,7 @@ struct FTakeHitInfo
 	UClass* DamageTypeClass;
 
 	UPROPERTY()
-	TWeakObjectPtr<class ASCharacter> PawnInstigator;
+	TWeakObjectPtr<class ASBaseCharacter> PawnInstigator;
 
 	UPROPERTY()
 	TWeakObjectPtr<class AActor> DamageCauser;
