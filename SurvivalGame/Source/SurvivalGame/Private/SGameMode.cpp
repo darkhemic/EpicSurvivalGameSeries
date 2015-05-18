@@ -10,6 +10,12 @@
 #include "STypes.h"
 #include "SSpectatorPawn.h"
 #include "SZombieAIController.h"
+#include "SZombieCharacter.h"
+#include "SCharacter.h"
+#include "SPlayerStart.h"
+
+/* Define a log category for error messages */
+DEFINE_LOG_CATEGORY_STATIC(LogGameMode, Log, All);
 
 
 ASGameMode::ASGameMode(const FObjectInitializer& ObjectInitializer)
@@ -22,10 +28,40 @@ ASGameMode::ASGameMode(const FObjectInitializer& ObjectInitializer)
 	SpectatorClass = ASSpectatorPawn::StaticClass();
 
 	bAllowFriendlyFireDamage = false;
+	bSpawnAtTeamPlayer = true;
+
+	/* Start the game at 16:00 */
+	TimeOfDayStart = 16 * 60;
+	NightSurvivedScore = 100;
 
 	/* Default team is 1 for players and 0 for enemies */
 	PlayerTeamNum = 1;
 }
+
+
+void ASGameMode::InitGameState()
+{
+	Super::InitGameState();
+
+	ASGameState* MyGameState = Cast<ASGameState>(GameState);
+	if (MyGameState)
+	{
+		MyGameState->ElapsedGameMinutes = TimeOfDayStart;
+	}
+}
+
+
+
+void ASGameMode::StartMatch()
+{
+	if (!HasMatchStarted())
+	{
+		GetWorldTimerManager().SetTimer(TimerHandle_BotSpawns, this, &ASGameMode::SpawnBotHandler, 5.0f, true);
+	}
+
+	Super::StartMatch();
+}
+
 
 
 void ASGameMode::DefaultTimer()
@@ -52,20 +88,13 @@ void ASGameMode::DefaultTimer()
 			MyGameState->ElapsedGameMinutes += MyGameState->GetTimeOfDayIncrement();
 
 			/* Determine our state */
-			const float TimeOfDay = MyGameState->ElapsedGameMinutes - MyGameState->GetElapsedDaysInMinutes();
-			if (TimeOfDay > (6 * 60) && TimeOfDay < (18 * 60))
-			{
-				MyGameState->bIsNight = false;
-			}
-			else
-			{
-				MyGameState->bIsNight = true;
-			}
+			MyGameState->GetAndUpdateIsNight();
 
 			/* Trigger events when night starts or ends */
-			if (MyGameState->bIsNight != bWasNight)
+			bool CurrentIsNight = MyGameState->GetIsNight();
+			if (CurrentIsNight != LastIsNight)
 			{
-				FString MessageText = MyGameState->bIsNight ? "NIGHT HAS FALLEN" : "SUNRISE!";
+				FString MessageText = CurrentIsNight ? "SURVIVE!" : "You Survived! Now prepare for the coming night!";
 
 				ASGameState* MyGameState = Cast<ASGameState>(GameState);
 				if (MyGameState)
@@ -74,28 +103,48 @@ void ASGameMode::DefaultTimer()
 				}
 
 				/* The night just ended, respawn all dead players */
-				if (!MyGameState->bIsNight)
+				if (!CurrentIsNight)
 				{
 					/* Respawn spectating players that died during the night */
 					for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; It++)
 					{
 						/* Look for all players that are spectating */
 						ASPlayerController* MyController = Cast<ASPlayerController>(*It);
-						if (MyController && MyController->PlayerState->bIsSpectator)
+						if (MyController)
 						{
-							MyController->RespawnPlayer();
+							if (MyController->PlayerState->bIsSpectator)
+							{
+								MyController->RespawnPlayer();
+							}
+							else
+							{
+								/* Player still alive, award him some points */
+								ASCharacter* MyPawn = Cast<ASCharacter>(MyController->GetPawn());
+								if (MyPawn && MyPawn->IsAlive())
+								{
+									ASPlayerState* PS = Cast<ASPlayerState>(MyController->PlayerState);
+									if (PS)
+									{
+										PS->ScorePoints(NightSurvivedScore);
+									}
+								}
+							}
 						}
 					}
 				}
+
+				/* Update bot states */
+				if (CurrentIsNight)
+				{
+					WakeAllBots();
+				}
+				else
+				{
+					PassifyAllBots();
+				}
 			}
 
-			if (MyGameState->bIsNight)
-			{
-				// Spawn a new enemy. TEMPORARY ONLY
-				SpawnNewBot();
-			}
-
-			bWasNight = MyGameState->bIsNight;
+			LastIsNight = MyGameState->bIsNight;
 		}
 	}
 }
@@ -104,6 +153,10 @@ void ASGameMode::DefaultTimer()
 bool ASGameMode::CanDealDamage(class ASPlayerState* DamageCauser, class ASPlayerState* DamagedPlayer) const
 {
 	if (bAllowFriendlyFireDamage)
+		return true;
+
+	/* Allow damage to self */
+	if (DamagedPlayer == DamageCauser)
 		return true;
 
 	// Compare Team Numbers
@@ -182,6 +235,9 @@ void ASGameMode::FinishMatch()
 	{
 		EndMatch();
 
+		/* Stop spawning bots */
+		GetWorldTimerManager().ClearTimer(TimerHandle_BotSpawns);
+
 		for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; It++)
 		{
 			ASPlayerController* MyController = Cast<ASPlayerController>(*It);
@@ -207,9 +263,6 @@ void ASGameMode::Killed(AController* Killer, AController* VictimPlayer, APawn* V
 	if (VictimPS && !VictimPS->bIsABot)
 	{
 		VictimPS->AddDeath();
-
-		// TODO: Let coop buddy know this player died
-		//VictimPS->BroadcastDeath(KillerPS, DamageType, VictimPS);
 	}
 
 	/* End match is all players died */
@@ -261,23 +314,18 @@ AActor* ASGameMode::ChoosePlayerStart(AController* Player)
 
 bool ASGameMode::IsSpawnpointAllowed(APlayerStart* SpawnPoint, AController* Controller)
 {
-	/* No tag was specified, we will treat it as anyone may spawn here  */
-	if (SpawnPoint->PlayerStartTag.IsNone())
-		return true;
-
 	if (Controller == nullptr || Controller->PlayerState == nullptr)
 		return true;
 
-	if (Controller->PlayerState->bIsABot && SpawnPoint->PlayerStartTag.IsEqual(NAME_EnemyStart))
+	/* Check for extended playerstart class */
+	ASPlayerStart* MyPlayerStart = Cast<ASPlayerStart>(SpawnPoint);
+	if (MyPlayerStart)
 	{
-		return true;
-	}
-	else if (!Controller->PlayerState->bIsABot && SpawnPoint->PlayerStartTag.IsEqual(NAME_PlayerStart))
-	{
-		return true;
+		return MyPlayerStart->GetIsPlayerOnly() && !Controller->PlayerState->bIsABot;
 	}
 
-	return false;
+	/* Cast failed, Anyone can spawn at the base playerstart class */
+	return true;
 }
 
 
@@ -302,9 +350,15 @@ bool ASGameMode::IsSpawnpointPreferred(APlayerStart* SpawnPoint, AController* Co
 				}
 			}
 		}
+
+		ASPlayerStart* MyPlayerStart = Cast<ASPlayerStart>(SpawnPoint);
+		if (MyPlayerStart)
+		{
+			return MyPlayerStart->GetIsPlayerOnly() && !Controller->PlayerState->bIsABot;
+		}
 	}
 
-	return true;
+	return false;
 }
 
 
@@ -326,4 +380,132 @@ UClass* ASGameMode::GetDefaultPawnClassForController(AController* InController)
 	}
 
 	return Super::GetDefaultPawnClassForController(InController);
+}
+
+
+bool ASGameMode::CanSpectate(APlayerController* Viewer, APlayerState* ViewTarget)
+{
+	/* Don't allow spectating of other non-player bots */
+	return (ViewTarget && !ViewTarget->bIsABot);
+}
+
+
+void ASGameMode::PassifyAllBots()
+{
+	for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; It++)
+	{
+		ASZombieCharacter* AIPawn = Cast<ASZombieCharacter>(*It);
+		if (AIPawn)
+		{
+			AIPawn->SetBotType(EBotBehaviorType::Passive);
+		}
+	}
+}
+
+
+void ASGameMode::WakeAllBots()
+{
+	for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; It++)
+	{
+		ASZombieCharacter* AIPawn = Cast<ASZombieCharacter>(*It);
+		if (AIPawn)
+		{
+			AIPawn->SetBotType(EBotBehaviorType::Patrolling);
+		}
+	}
+}
+
+
+void ASGameMode::SpawnBotHandler()
+{
+	ASGameState* MyGameState = Cast<ASGameState>(GameState);
+	if (MyGameState)
+	{
+		/* Only spawn bots during night time */
+		if (MyGameState->GetIsNight())
+		{
+			/* This could be any dynamic number based on difficulty (eg. increasing after having survived a few nights) */
+			const int32 MaxPawns = 10;
+
+			/* Check number of available pawns (players included) */
+			if (GetWorld()->GetNumPawns() < MaxPawns)
+			{
+				SpawnNewBot();
+			}
+		}
+	}
+}
+
+
+void ASGameMode::RestartPlayer(class AController* NewPlayer)
+{
+	if (!bSpawnAtTeamPlayer)
+	{
+		Super::RestartPlayer(NewPlayer);
+		return;
+	}
+
+	/* Look for a live player to spawn next to */
+	FVector SpawnOrigin = FVector::ZeroVector;
+	FRotator StartRotation = FRotator::ZeroRotator;
+	for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; It++)
+	{
+		ASCharacter* MyCharacter = Cast<ASCharacter>(*It);
+		if (MyCharacter && MyCharacter->IsAlive())
+		{
+			/* Get the origin of the first player we can find */
+			SpawnOrigin = MyCharacter->GetActorLocation();
+			StartRotation = MyCharacter->GetActorRotation();
+			break;
+		}
+	}
+
+	/* No player is alive (yet) - spawn using one of the PlayerStarts */
+	if (SpawnOrigin == FVector::ZeroVector)
+	{
+		Super::RestartPlayer(NewPlayer);
+		return;
+	}
+
+	/* Get a point on the nav mesh near the other player */
+	FVector StartLocation = UNavigationSystem::GetRandomPointInRadius(NewPlayer, SpawnOrigin, 250.0f);
+
+	// Try to create a pawn to use of the default class for this player
+	if (NewPlayer->GetPawn() == nullptr && GetDefaultPawnClassForController(NewPlayer) != nullptr)
+	{
+		FActorSpawnParameters SpawnInfo;
+		SpawnInfo.Instigator = Instigator;
+		APawn* ResultPawn = GetWorld()->SpawnActor<APawn>(GetDefaultPawnClassForController(NewPlayer), StartLocation, StartRotation, SpawnInfo);
+		if (ResultPawn == nullptr)
+		{
+			UE_LOG(LogGameMode, Warning, TEXT("Couldn't spawn Pawn of type %s at %s"), *GetNameSafe(DefaultPawnClass), &StartLocation);
+		}
+		NewPlayer->SetPawn(ResultPawn);
+	}
+
+	if (NewPlayer->GetPawn() == nullptr)
+	{
+		NewPlayer->FailedToSpawnPawn();
+	}
+	else
+	{
+		NewPlayer->Possess(NewPlayer->GetPawn());
+
+		// If the Pawn is destroyed as part of possession we have to abort
+		if (NewPlayer->GetPawn() == nullptr)
+		{
+			NewPlayer->FailedToSpawnPawn();
+		}
+		else
+		{
+			// Set initial control rotation to player start's rotation
+			NewPlayer->ClientSetRotation(NewPlayer->GetPawn()->GetActorRotation(), true);
+
+			FRotator NewControllerRot = StartRotation;
+			NewControllerRot.Roll = 0.f;
+			NewPlayer->SetControlRotation(NewControllerRot);
+
+			SetPlayerDefaults(NewPlayer->GetPawn());
+		}
+	}
 }
