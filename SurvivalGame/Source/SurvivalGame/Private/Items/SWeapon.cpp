@@ -169,6 +169,13 @@ void ASWeapon::OnUnEquip()
 
 		GetWorldTimerManager().ClearTimer(EquipFinishedTimerHandle);
 	}
+	if (bPendingReload)
+	{
+		StopWeaponAnimation(ReloadAnim);
+		bPendingReload = false;
+
+		GetWorldTimerManager().ClearTimer(TimerHandle_ReloadWeapon);
+	}
 
 	DetermineWeaponState();
 }
@@ -487,7 +494,7 @@ UAudioComponent* ASWeapon::PlayWeaponSound(USoundCue* SoundToPlay)
 	UAudioComponent* AC = nullptr;
 	if (SoundToPlay && MyPawn)
 	{
-		AC = UGameplayStatics::PlaySoundAttached(SoundToPlay, MyPawn->GetRootComponent());
+		AC = UGameplayStatics::SpawnSoundAttached(SoundToPlay, MyPawn->GetRootComponent());
 	}
 
 	return AC;
